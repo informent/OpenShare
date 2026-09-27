@@ -24,7 +24,27 @@ try
     await Reject("tamper", new TransferHeader("file.txt", 3, new string('0', 64)), new byte[] { 1, 2, 3 });
     await Reject("truncated", new TransferHeader("file.txt", 8, new string('0', 64)), new byte[] { 1 });
     await Reject("oversized-header", null, Array.Empty<byte>());
-    Console.WriteLine("PASS: 3 verified round trips and 6 rejected unsafe transfers; existing files preserved and partial files removed.");
+    using (var listener = new TcpListener(IPAddress.Loopback, 0))
+    {
+        listener.Start();
+        using var cancel = new CancellationTokenSource();
+        var destination = Path.Combine(root, "cancelled");
+        var receiving = TransferEngine.ReceiveAsync(listener, destination, cancellationToken: cancel.Token);
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new TransferHeader("incomplete.bin", 10000, new string('0', 64)));
+        await client.GetStream().WriteAsync(BitConverter.GetBytes(bytes.Length));
+        await client.GetStream().WriteAsync(bytes);
+        await client.GetStream().WriteAsync(new byte[] { 1 });
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while ((!Directory.Exists(destination) || Directory.GetFiles(destination).Length == 0) && DateTime.UtcNow < deadline) await Task.Delay(20);
+        if (!Directory.Exists(destination) || Directory.GetFiles(destination).Length == 0) throw new Exception("Receiver did not begin writing.");
+        cancel.Cancel();
+        try { await receiving.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Cancelled transfer succeeded."); }
+        catch (OperationCanceledException) { }
+        if (Directory.GetFiles(destination).Length != 0) throw new Exception("Cancellation left a partial file.");
+    }
+    Console.WriteLine("PASS: 3 verified round trips, 6 rejected unsafe transfers, and active-transfer cancellation with partial-file cleanup.");
 }
 finally { Directory.Delete(root, true); }
 

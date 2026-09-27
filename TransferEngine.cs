@@ -45,7 +45,27 @@ public static class TransferEngine
     }
     private static async Task WriteHeader(Stream stream, TransferHeader header, CancellationToken token) { var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(header)); await stream.WriteAsync(BitConverter.GetBytes(bytes.Length), token); await stream.WriteAsync(bytes, token); }
     private static async Task<TransferHeader> ReadHeader(Stream stream, CancellationToken token) { var length = new byte[4]; await ReadExact(stream, length, token); var count = BitConverter.ToInt32(length); if (count < 1 || count > 16384) throw new InvalidDataException("Transfer header exceeds the allowed size."); var bytes = new byte[count]; await ReadExact(stream, bytes, token); return JsonSerializer.Deserialize<TransferHeader>(bytes) ?? throw new InvalidDataException("Invalid transfer header."); }
-    private static async Task CopyAsync(Stream source, Stream target, long length, IProgress<double>? progress, CancellationToken token) { var buffer = new byte[128 * 1024]; long copied = 0; int read; while (copied < length && (read = await source.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, length - copied)), token)) > 0) { await target.WriteAsync(buffer.AsMemory(0, read), token); copied += read; progress?.Report((double)copied / length); } if (copied != length) throw new EndOfStreamException("Transfer ended before all bytes arrived."); }
-    private static async Task ReadExact(Stream stream, byte[] buffer, CancellationToken token) { var offset = 0; while (offset < buffer.Length) { var read = await stream.ReadAsync(buffer.AsMemory(offset, buffer.Length - offset), token); if (read == 0) throw new EndOfStreamException(); offset += read; } }
+    private static async Task CopyAsync(Stream source, Stream target, long length, IProgress<double>? progress, CancellationToken token)
+    {
+        var buffer = new byte[128 * 1024]; long copied = 0;
+        while (copied < length)
+        {
+            var read = await ReadWithTimeout(source, buffer.AsMemory(0, (int)Math.Min(buffer.Length, length - copied)), token);
+            if (read == 0) throw new EndOfStreamException("Transfer ended before all bytes arrived.");
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            await target.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
+            copied += read; progress?.Report((double)copied / length);
+        }
+        progress?.Report(1);
+    }
+    private static async Task<int> ReadWithTimeout(Stream stream, Memory<byte> buffer, CancellationToken token)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        try { return await stream.ReadAsync(buffer, timeout.Token); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new IOException("The connection was idle for 30 seconds."); }
+    }
+    private static async Task ReadExact(Stream stream, byte[] buffer, CancellationToken token) { var offset = 0; while (offset < buffer.Length) { var read = await ReadWithTimeout(stream, buffer.AsMemory(offset, buffer.Length - offset), token); if (read == 0) throw new EndOfStreamException(); offset += read; } }
     private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
 }
