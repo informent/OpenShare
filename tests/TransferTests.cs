@@ -5,6 +5,17 @@ using System.Security.Cryptography;
 using System.Net.Sockets;
 using OpenShare;
 using System.Text.Json;
+using System.Diagnostics;
+if (args.Length == 2 && args[0] == "--receiver")
+{
+    using var childSession = new ReceiveSession();
+    using var childListener = new TcpListener(IPAddress.Loopback, 0);
+    childListener.Start();
+    Console.WriteLine(childSession.Code("127.0.0.1", ((IPEndPoint)childListener.LocalEndpoint).Port));
+    using var childTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+    await TransferEngine.ReceiveAsync(childListener, args[1], childSession, (_, _) => Task.FromResult(true), cancellationToken: childTimeout.Token);
+    return;
+}
 var root = Path.Combine(Path.GetTempPath(), "openshare-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
 using var session = new ReceiveSession();
@@ -32,6 +43,8 @@ try
     await Reject("oversized-header", null, Array.Empty<byte>());
     await Reject("disk-space", new TransferHeader("huge.bin", long.MaxValue, new string('0', 64)), Array.Empty<byte>());
     await Reject("reserved-name", new TransferHeader("CON.txt", 0, new string('0', 64)), Array.Empty<byte>());
+    foreach (var name in new[] { "NUL", "AUX.log", "COM1.txt", "LPT9", "trail.", "trail ", "file:stream", "..\\escape.bin" })
+        await Reject("unsafe-" + Guid.NewGuid().ToString("N"), new TransferHeader(name, 0, new string('0', 64)), Array.Empty<byte>());
     using (var listener = new TcpListener(IPAddress.Loopback, 0))
     {
         listener.Start();
@@ -115,7 +128,26 @@ try
     }
     var validCode = session.Code("127.0.0.1", 1234);
     if (PairingCode.Parse(validCode.ToString()) != validCode) throw new Exception("Pairing code round trip failed.");
-    Console.WriteLine("PASS: 3 encrypted round trips, 8 unsafe transfers rejected, explicit decline without disk writes, cancellation cleanup, wrong certificate and secret rejected, and 5 pairing parser checks.");
+    await SeparateProcessTransfer();
+    using (var locked = new FileStream(Path.Combine(root, "payload-100000.bin"), FileMode.Open, FileAccess.Read, FileShare.None))
+    {
+        try { await TransferEngine.SendAsync(locked.Name, session.Code("127.0.0.1", 1)); throw new Exception("Locked source was accepted."); }
+        catch (IOException) { }
+    }
+    using (var listener = new TcpListener(IPAddress.Loopback, 0))
+    {
+        listener.Start();
+        var blockedFolder = Path.Combine(root, "not-a-directory");
+        File.WriteAllText(blockedFolder, "preserve this file");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var receiving = TransferEngine.ReceiveAsync(listener, blockedFolder, session, (_, _) => Task.FromResult(true), cancellationToken: timeout.Token);
+        try { await TransferEngine.SendAsync(Path.Combine(root, "payload-100000.bin"), session.Code("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port), cancellationToken: timeout.Token); throw new Exception("Invalid destination reported success."); }
+        catch (IOException) { }
+        try { await receiving; throw new Exception("Invalid destination accepted."); }
+        catch (IOException) { }
+        if (File.ReadAllText(blockedFolder) != "preserve this file") throw new Exception("Destination blocker was modified.");
+    }
+    Console.WriteLine("PASS: encrypted round trips, 16 unsafe transfers rejected, explicit decline, receive/send/approval cancellation, wrong certificate and secret rejection, pairing parsing, and separate-process 256 MiB Unicode transfer.");
 }
 finally { Directory.Delete(root, true); }
 
@@ -154,4 +186,36 @@ async Task<SslStream> Connect(TcpClient client)
     await stream.ReadExactlyAsync(acknowledgement);
     if (acknowledgement[0] != 1) throw new Exception("Pairing rejected.");
     return stream;
+}
+
+async Task SeparateProcessTransfer()
+{
+    var source = Path.Combine(root, "Unicode-\u65e5\u672c\u8a9e-\u00e9-large.bin");
+    var destination = Path.Combine(root, "separate-process");
+    await using (var file = File.Create(source))
+    {
+        var block = RandomNumberGenerator.GetBytes(1024 * 1024);
+        for (var i = 0; i < 256; i++) await file.WriteAsync(block);
+    }
+    var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+    if (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase))
+        start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+    start.ArgumentList.Add("--receiver");
+    start.ArgumentList.Add(destination);
+    using var child = Process.Start(start) ?? throw new Exception("Receiver process did not start.");
+    var stderr = child.StandardError.ReadToEndAsync();
+    try
+    {
+        var code = await child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        if (code is null) throw new Exception("Receiver exited before pairing: " + await stderr);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        await TransferEngine.SendAsync(source, PairingCode.Parse(code), cancellationToken: timeout.Token);
+        await child.WaitForExitAsync(timeout.Token);
+        if (child.ExitCode != 0) throw new Exception("Receiver failed: " + await stderr);
+        using var original = File.OpenRead(source);
+        using var received = File.OpenRead(Path.Combine(destination, Path.GetFileName(source)));
+        if (original.Length != received.Length || !SHA256.HashData(original).SequenceEqual(SHA256.HashData(received))) throw new Exception("Separate-process content mismatch.");
+        Console.WriteLine("PASS: separate receiver process saved and verified 256 MiB with a Unicode filename.");
+    }
+    finally { if (!child.HasExited) { child.Kill(true); await child.WaitForExitAsync(); } }
 }

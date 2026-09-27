@@ -9,3 +9,13 @@ jobs:
         with: { dotnet-version: 10.0.x }
       - run: dotnet run --project tests/TransferTests.csproj --nologo
       - run: dotnet build OpenShare.csproj -c Release --nologo
+      - name: Publish executable for UI tests
+        run: dotnet publish OpenShare.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o test-output
+      - name: Packaged application UI checks
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          foreach ($decision in @('Accept', 'Decline', 'Expire')) {
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./tests/UiSmoke.ps1 -Exe "$pwd/test-output/OpenShare.exe" -Decision $decision
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

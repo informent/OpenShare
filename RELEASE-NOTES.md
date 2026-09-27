@@ -1,11 +1,14 @@
-# OpenShare 0.2.0 preview
+# OpenShare 0.3.0 preview
 
-This grouped update replaces the initial plaintext protocol with encrypted, privately paired transfers. Both devices need this version.
+This grouped reliability update adds receiver consent, storage safeguards, usable progress feedback and executable-level regression tests.
 
-- TLS 1.2/1.3 with receiver certificate fingerprint verification and a fresh 256-bit pairing secret per receiving session.
-- Receiver acknowledgement only after saving and SHA-256 verification.
-- No overwriting existing files; temporary data removed after failed or cancelled transfers.
-- Stop receiving, bounded connection setup and idle reads, and selectable pairing codes for available IPv4 interfaces.
-- Expanded automated tests cover encrypted transfers, incorrect fingerprints and secrets, unsafe metadata, damaged data, cancellation, and pairing-code validation.
+- Review the filename, size and destination before accepting an incoming file. Approval defaults to No and expires automatically.
+- Preflight disk space with a 16 MiB reserve; reject Windows device names and preserve existing files.
+- Cancel sending as well as receiving. Hash large sources before connecting to avoid receiver idle timeouts.
+- Show transferred size, approximate speed, estimated remaining time and the verification stage.
+- Correct a clipped Send button and provide scrolling at smaller window sizes.
+- Write privacy-minimized diagnostic logs under Downloads/GITHUB/OpenShare/Logs.
+- Test 256 MiB encrypted transfers between separate processes, Unicode names, locked sources, blocked destinations, and failure cleanup.
+- Exercise the packaged app's file picker, pairing, acceptance, rejection and timeout through automated UI tests.
 
-Windows x64 preview. Local tests passed, including published-app window creation and graceful shutdown. Two-physical-device testing and a full UI interaction review are still pending. Browser/phone support, disk-space preflight, and per-file receive approval are not implemented. Treat pairing codes as passwords. The app is unsigned and may trigger Windows SmartScreen.
+Windows x64 preview. Local engine and packaged UI tests passed. Two-physical-device testing, an exhaustive DPI/accessibility review and an independent security audit remain unverified. Browser/phone peers, folders and resumable transfers are not implemented. Treat pairing codes as passwords. The app is unsigned and may trigger Windows SmartScreen. See VALIDATION.md for exact coverage and limits.
