@@ -16,6 +16,7 @@ public partial class MainWindow : Window
         cancellation = new CancellationTokenSource();
         try
         {
+            using var session = new ReceiveSession();
             listener = new TcpListener(IPAddress.Any, 0);
             listener.Start();
             port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -23,13 +24,13 @@ public partial class MainWindow : Window
                 .Where(n => n.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
                 .SelectMany(n => n.GetIPProperties().UnicastAddresses)
                 .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a.Address))
-                .Select(a => $"{a.Address}:{port}").Distinct().ToArray();
-            PairCode.Text = addresses.Length == 0 ? $"127.0.0.1:{port} (this PC only)" : string.Join("\n", addresses);
+                .Select(a => session.Code(a.Address.ToString(), port).ToString()).Distinct().ToArray();
+            PairCode.Text = addresses.Length == 0 ? session.Code("127.0.0.1", port).ToString() : string.Join("\n", addresses);
             ListenButton.Content = "Stop receiving";
             Progress.Value = 0;
             StatusText.Text = $"Waiting for one file in {folder}";
             var progress = new Progress<double>(value => Progress.Value = value);
-            var header = await TransferEngine.ReceiveAsync(listener, folder, progress, cancellation.Token);
+            var header = await TransferEngine.ReceiveAsync(listener, folder, session, progress, cancellation.Token);
             StatusText.Text = $"Received and verified {header.Name}";
         }
         catch (OperationCanceledException) { StatusText.Text = "Receiving stopped. Incomplete data was removed."; }
@@ -48,12 +49,13 @@ public partial class MainWindow : Window
     {
         var path = selectedFile;
         if (path is null || !File.Exists(path)) { StatusText.Text = "Choose a file first."; return; }
-        var parts = CodeBox.Text.Trim().Split(':', 2);
-        if (parts.Length != 2 || !int.TryParse(parts[1], out var receiverPort) || receiverPort is < 1 or > 65535) { StatusText.Text = "Enter the receiver address as IP:port."; return; }
+        PairingCode pairing;
+        try { pairing = PairingCode.Parse(CodeBox.Text); }
+        catch (FormatException ex) { StatusText.Text = ex.Message; return; }
         var button = (System.Windows.Controls.Button)sender;
         button.IsEnabled = false;
         StatusText.Text = "Sending file over the local network...";
-        try { var progress = new Progress<double>(value => Progress.Value = value); await TransferEngine.SendAsync(path, parts[0], receiverPort, progress); StatusText.Text = "Receiver confirmed: file saved and verified."; }
+        try { var progress = new Progress<double>(value => Progress.Value = value); await TransferEngine.SendAsync(path, pairing, progress); StatusText.Text = "Receiver confirmed: file saved and verified."; }
         catch (Exception ex) { StatusText.Text = $"Transfer not confirmed: {ex.Message}"; }
         finally { button.IsEnabled = true; }
     }

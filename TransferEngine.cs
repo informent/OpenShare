@@ -1,26 +1,86 @@
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 namespace OpenShare;
 public sealed record TransferHeader(string Name, long Length, string Sha256);
+public sealed record PairingCode(string Host, int Port, string Fingerprint, string Secret)
+{
+    public override string ToString() => $"openshare1|{Host}|{Port}|{Fingerprint}|{Secret}";
+    public static PairingCode Parse(string text)
+    {
+        var parts = text.Trim().Split('|');
+        if (parts.Length != 5 || parts[0] != "openshare1" ||
+            !IPAddress.TryParse(parts[1], out var address) || address.AddressFamily != AddressFamily.InterNetwork ||
+            !int.TryParse(parts[2], out var port) || port is < 1 or > 65535 ||
+            parts[3].Length != 64 || !parts[3].All(Uri.IsHexDigit) ||
+            parts[4].Length != 64 || !parts[4].All(Uri.IsHexDigit))
+            throw new FormatException("Paste one complete pairing code from the receiver.");
+        return new(address.ToString(), port, parts[3], parts[4]);
+    }
+}
+public sealed class ReceiveSession : IDisposable
+{
+    private readonly RSA key = RSA.Create(2048);
+    public X509Certificate2 Certificate { get; }
+    public byte[] Secret { get; } = RandomNumberGenerator.GetBytes(32);
+    public ReceiveSession()
+    {
+        var request = new CertificateRequest("CN=OpenShare", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var generated = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+        // Schannel requires a key container, not an ephemeral CNG key. DefaultKeySet
+        // creates a temporary container whose lifetime is owned by this certificate.
+        var pfx = generated.Export(X509ContentType.Pfx);
+        try { Certificate = X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.DefaultKeySet); }
+        finally { CryptographicOperations.ZeroMemory(pfx); }
+    }
+    public PairingCode Code(string host, int port) => new(host, port, Certificate.GetCertHashString(HashAlgorithmName.SHA256), Convert.ToHexString(Secret));
+    public void Dispose() { Certificate.Dispose(); key.Dispose(); CryptographicOperations.ZeroMemory(Secret); }
+}
 public static class TransferEngine
 {
-    public static async Task SendAsync(string path, string host, int port, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
+    public static async Task SendAsync(string path, PairingCode pairing, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
-        await using var file = File.OpenRead(path); using var client = new TcpClient(); await client.ConnectAsync(host, port, cancellationToken); await using var stream = client.GetStream(); var header = new TransferHeader(Path.GetFileName(path), file.Length, Hash(path)); await WriteHeader(stream, header, cancellationToken); await CopyAsync(file, stream, file.Length, progress, cancellationToken);
+        pairing = PairingCode.Parse(pairing.ToString());
+        await using var file = File.OpenRead(path);
+        using var client = new TcpClient();
+        using var setupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        setupTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+        await client.ConnectAsync(pairing.Host, pairing.Port, setupTimeout.Token);
+        await using var stream = new SslStream(client.GetStream(), false, (_, certificate, _, _) =>
+            certificate is not null && CryptographicOperations.FixedTimeEquals(certificate.GetCertHash(HashAlgorithmName.SHA256), Convert.FromHexString(pairing.Fingerprint)));
+        await stream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "OpenShare", EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 }, setupTimeout.Token);
+        await stream.WriteAsync(Convert.FromHexString(pairing.Secret), setupTimeout.Token);
+        var accepted = new byte[1];
+        await ReadExact(stream, accepted, setupTimeout.Token);
+        if (accepted[0] != 1) throw new AuthenticationException("The receiver rejected this pairing code.");
+        var hash = Convert.ToHexString(await SHA256.HashDataAsync(file, cancellationToken));
+        file.Position = 0;
+        var header = new TransferHeader(Path.GetFileName(path), file.Length, hash);
+        await WriteHeader(stream, header, cancellationToken);
+        await CopyAsync(file, stream, file.Length, progress, cancellationToken);
         using var acknowledgementTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         acknowledgementTimeout.CancelAfter(TimeSpan.FromSeconds(30));
         var acknowledgement = new byte[1];
         await ReadExact(stream, acknowledgement, acknowledgementTimeout.Token);
         if (acknowledgement[0] != 1) throw new IOException("Receiver did not confirm verification.");
     }
-    public static async Task<TransferHeader> ReceiveAsync(TcpListener listener, string folder, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
+    public static async Task<TransferHeader> ReceiveAsync(TcpListener listener, string folder, ReceiveSession session, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
         using var client = await listener.AcceptTcpClientAsync(cancellationToken);
-        await using var stream = client.GetStream();
+        await using var stream = new SslStream(client.GetStream(), false);
+        using var setupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        setupTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+        await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = session.Certificate, EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 }, setupTimeout.Token);
+        var secret = new byte[32];
+        await ReadExact(stream, secret, setupTimeout.Token);
+        if (!CryptographicOperations.FixedTimeEquals(secret, session.Secret)) throw new AuthenticationException("The sender used an invalid pairing code.");
+        await stream.WriteAsync(new byte[] { 1 }, setupTimeout.Token);
         var header = await ReadHeader(stream, cancellationToken);
         var safeName = Path.GetFileName(header.Name);
         if (string.IsNullOrWhiteSpace(safeName) || safeName != header.Name || safeName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || safeName.EndsWith('.') || safeName.EndsWith(' ') || safeName is "." or "..") throw new InvalidDataException("The incoming filename is unsafe.");
