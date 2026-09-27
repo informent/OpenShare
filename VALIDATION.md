@@ -14,6 +14,8 @@
 
 ## Limits, not passes
 
+The [clean Windows CI run](https://github.com/informent/OpenShare/actions/runs/36347340630) also passed the transfer suite, build, self-contained publishing, and all three packaged UI workflows (Accept, Decline, Expire). This confirms a second Windows environment, not a transfer between two physical PCs.
+
 - Two physical PCs, separate Wi-Fi networks, firewall profiles and routed networks have not been exercised. Same-PC processes are not a substitute for that coverage.
 - No independent security audit, exhaustive DPI/accessibility audit or code-signing certificate.
 - The 256 MiB test does not prove multi-gigabyte performance. Free-space checks cannot reserve disk capacity against other applications.
