@@ -1,0 +1,4 @@
+using System.Net;
+using System.Net.Sockets;
+using OpenShare;
+var root = Path.Combine(Path.GetTempPath(), "openshare-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root); var source = Path.Combine(root, "payload.bin"); File.WriteAllBytes(source, Enumerable.Range(0, 100_000).Select(i => (byte)(i % 251)).ToArray()); var destination = Path.Combine(root, "received"); var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start(); var port = ((IPEndPoint)listener.LocalEndpoint).Port; var receive = TransferEngine.ReceiveAsync(listener, destination); await TransferEngine.SendAsync(source, "127.0.0.1", port); var header = await receive; if (header.Name != "payload.bin" || !File.ReadAllBytes(Path.Combine(destination, header.Name)).SequenceEqual(File.ReadAllBytes(source))) throw new Exception("Loopback transfer verification failed."); listener.Stop(); Directory.Delete(root, true); Console.WriteLine("PASS: loopback transfer and SHA-256 verification");
