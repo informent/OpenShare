@@ -88,9 +88,13 @@ async Task Reject(string name, TransferHeader? header, byte[] payload, bool exis
         await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
         using var stream = await Connect(client);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(header);
-        await stream.WriteAsync(BitConverter.GetBytes(header is null ? int.MaxValue : bytes.Length));
-        if (header is not null) { await stream.WriteAsync(bytes); await stream.WriteAsync(payload); }
-        await stream.ShutdownAsync();
+        try
+        {
+            await stream.WriteAsync(BitConverter.GetBytes(header is null ? int.MaxValue : bytes.Length));
+            if (header is not null) { await stream.WriteAsync(bytes); await stream.WriteAsync(payload); }
+            await stream.ShutdownAsync();
+        }
+        catch (IOException) { /* The receiver may close immediately on invalid metadata. Its result is asserted below. */ }
         try { await receiving; throw new Exception("Unsafe transfer accepted: " + name); }
         catch (Exception ex) when (ex is IOException or InvalidDataException or System.Text.Json.JsonException) { }
     }
