@@ -17,7 +17,7 @@ try
         var destination = Path.Combine(root, "received");
         using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var receive = TransferEngine.ReceiveAsync(listener, destination, session, cancellationToken: timeout.Token);
+        var receive = TransferEngine.ReceiveAsync(listener, destination, session, (_, _) => Task.FromResult(true), cancellationToken: timeout.Token);
         var send = TransferEngine.SendAsync(source, session.Code("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port), cancellationToken: timeout.Token);
         try { await Task.WhenAll(receive, send); }
         catch { Console.Error.WriteLine(receive.Exception); throw; }
@@ -30,12 +30,14 @@ try
     await Reject("tamper", new TransferHeader("file.txt", 3, new string('0', 64)), new byte[] { 1, 2, 3 });
     await Reject("truncated", new TransferHeader("file.txt", 8, new string('0', 64)), new byte[] { 1 });
     await Reject("oversized-header", null, Array.Empty<byte>());
+    await Reject("disk-space", new TransferHeader("huge.bin", long.MaxValue, new string('0', 64)), Array.Empty<byte>());
+    await Reject("reserved-name", new TransferHeader("CON.txt", 0, new string('0', 64)), Array.Empty<byte>());
     using (var listener = new TcpListener(IPAddress.Loopback, 0))
     {
         listener.Start();
         using var cancel = new CancellationTokenSource();
         var destination = Path.Combine(root, "cancelled");
-        var receiving = TransferEngine.ReceiveAsync(listener, destination, session, cancellationToken: cancel.Token);
+        var receiving = TransferEngine.ReceiveAsync(listener, destination, session, (_, _) => Task.FromResult(true), cancellationToken: cancel.Token);
         using var client = new TcpClient();
         await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
         using var stream = await Connect(client);
@@ -56,7 +58,7 @@ try
         using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var destination = Path.Combine(root, wrongFingerprint ? "wrong-pin" : "wrong-secret");
-        var receiving = TransferEngine.ReceiveAsync(listener, destination, session, cancellationToken: timeout.Token);
+        var receiving = TransferEngine.ReceiveAsync(listener, destination, session, (_, _) => Task.FromResult(true), cancellationToken: timeout.Token);
         var code = session.Code("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port);
         code = wrongFingerprint ? code with { Fingerprint = new string('0', 64) } : code with { Secret = new string('0', 64) };
         try { await TransferEngine.SendAsync(Path.Combine(root, "payload-100000.bin"), code, cancellationToken: timeout.Token); throw new Exception("Invalid pairing accepted."); }
@@ -70,9 +72,50 @@ try
         try { PairingCode.Parse(invalid); throw new Exception("Malformed pairing accepted."); }
         catch (FormatException) { }
     }
+    using (var listener = new TcpListener(IPAddress.Loopback, 0))
+    {
+        listener.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var destination = Path.Combine(root, "declined");
+        var asked = false;
+        var receiving = TransferEngine.ReceiveAsync(listener, destination, session, (header, _) =>
+        {
+            asked = true;
+            if (Directory.Exists(destination)) throw new Exception("Destination created before approval.");
+            return Task.FromResult(false);
+        }, cancellationToken: timeout.Token);
+        try { await TransferEngine.SendAsync(Path.Combine(root, "payload-100000.bin"), session.Code("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port), cancellationToken: timeout.Token); throw new Exception("Declined transfer reported success."); }
+        catch (IOException) { }
+        try { await receiving; throw new Exception("Declined transfer accepted."); }
+        catch (IOException ex) when (ex.Message.Contains("declined")) { }
+        if (!asked || Directory.Exists(destination)) throw new Exception("Decline did not protect destination.");
+    }
+    using (var listener = new TcpListener(IPAddress.Loopback, 0))
+    {
+        listener.Start();
+        using var stopSending = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var stopReceiving = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var pendingApproval = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var destination = Path.Combine(root, "cancel-before-approval");
+        var receiving = TransferEngine.ReceiveAsync(listener, destination, session, async (_, token) =>
+        {
+            pendingApproval.SetResult();
+            await Task.Delay(Timeout.Infinite, token);
+            return true;
+        }, cancellationToken: stopReceiving.Token);
+        var sending = TransferEngine.SendAsync(Path.Combine(root, "payload-2000000.bin"), session.Code("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port), cancellationToken: stopSending.Token);
+        await pendingApproval.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        stopSending.Cancel();
+        try { await sending; throw new Exception("Cancelled sender succeeded."); }
+        catch (OperationCanceledException) { }
+        stopReceiving.Cancel();
+        try { await receiving; throw new Exception("Cancelled approval succeeded."); }
+        catch (OperationCanceledException) { }
+        if (Directory.Exists(destination)) throw new Exception("Pending approval wrote to disk.");
+    }
     var validCode = session.Code("127.0.0.1", 1234);
     if (PairingCode.Parse(validCode.ToString()) != validCode) throw new Exception("Pairing code round trip failed.");
-    Console.WriteLine("PASS: 3 encrypted round trips, 6 unsafe transfers rejected, cancellation cleanup, wrong certificate and secret rejected, and 5 pairing parser checks.");
+    Console.WriteLine("PASS: 3 encrypted round trips, 8 unsafe transfers rejected, explicit decline without disk writes, cancellation cleanup, wrong certificate and secret rejected, and 5 pairing parser checks.");
 }
 finally { Directory.Delete(root, true); }
 
@@ -82,7 +125,7 @@ async Task Reject(string name, TransferHeader? header, byte[] payload, bool exis
     if (existing) File.WriteAllText(Path.Combine(destination, "existing.txt"), "keep me");
     using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-    var receiving = TransferEngine.ReceiveAsync(listener, destination, session, cancellationToken: timeout.Token);
+    var receiving = TransferEngine.ReceiveAsync(listener, destination, session, (_, _) => Task.FromResult(true), cancellationToken: timeout.Token);
     using (var client = new TcpClient())
     {
         await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);

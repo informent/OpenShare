@@ -6,11 +6,12 @@ using Forms = System.Windows.Forms;
 namespace OpenShare;
 public partial class MainWindow : Window
 {
-    private TcpListener? listener; private CancellationTokenSource? cancellation; private string? receiveFolder; private string? selectedFile; private int port;
-    public MainWindow() { InitializeComponent(); Closed += (_, _) => cancellation?.Cancel(); Opacity = 0; Loaded += (_, _) => BeginAnimation(OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(240))); }
+    private TcpListener? listener; private CancellationTokenSource? cancellation; private CancellationTokenSource? sending; private string? receiveFolder; private string? selectedFile; private int port;
+    public MainWindow() { InitializeComponent(); Closed += (_, _) => { cancellation?.Cancel(); sending?.Cancel(); }; Opacity = 0; Loaded += (_, _) => BeginAnimation(OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(240))); }
     private async void Listen_Click(object sender, RoutedEventArgs e)
     {
         if (cancellation is not null) { cancellation.Cancel(); return; }
+        if (sending is not null) { StatusText.Text = "Finish or cancel sending before receiving."; return; }
         receiveFolder ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "OpenShare");
         var folder = receiveFolder;
         cancellation = new CancellationTokenSource();
@@ -30,10 +31,11 @@ public partial class MainWindow : Window
             Progress.Value = 0;
             StatusText.Text = $"Waiting for one file in {folder}";
             var progress = new Progress<double>(value => Progress.Value = value);
-            var header = await TransferEngine.ReceiveAsync(listener, folder, session, progress, cancellation.Token);
+            var header = await TransferEngine.ReceiveAsync(listener, folder, session, ApproveIncoming, progress, cancellation.Token);
             StatusText.Text = $"Received and verified {header.Name}";
         }
-        catch (OperationCanceledException) { StatusText.Text = "Receiving stopped. Incomplete data was removed."; }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { StatusText.Text = "Receiving stopped. Incomplete data was removed."; }
+        catch (OperationCanceledException) { StatusText.Text = "The connection or approval timed out. Start receiving to try again."; }
         catch (Exception ex) { StatusText.Text = $"Receive failed: {ex.Message}"; }
         finally
         {
@@ -47,16 +49,30 @@ public partial class MainWindow : Window
     private void File_Click(object sender, RoutedEventArgs e) { using var dialog = new Forms.OpenFileDialog { Title = "Choose a file to send" }; if (dialog.ShowDialog() == Forms.DialogResult.OK) { selectedFile = dialog.FileName; FileText.Text = selectedFile; } }
     private async void Send_Click(object sender, RoutedEventArgs e)
     {
+        if (sending is not null) { sending.Cancel(); return; }
+        if (cancellation is not null) { StatusText.Text = "Stop receiving before sending."; return; }
         var path = selectedFile;
         if (path is null || !File.Exists(path)) { StatusText.Text = "Choose a file first."; return; }
         PairingCode pairing;
         try { pairing = PairingCode.Parse(CodeBox.Text); }
         catch (FormatException ex) { StatusText.Text = ex.Message; return; }
         var button = (System.Windows.Controls.Button)sender;
-        button.IsEnabled = false;
-        StatusText.Text = "Sending file over the local network...";
-        try { var progress = new Progress<double>(value => Progress.Value = value); await TransferEngine.SendAsync(path, pairing, progress); StatusText.Text = "Receiver confirmed: file saved and verified."; }
+        sending = new CancellationTokenSource();
+        button.Content = "Cancel sending";
+        Progress.Value = 0;
+        StatusText.Text = "Preparing file. The receiver must approve it before saving.";
+        try { var progress = new Progress<double>(value => Progress.Value = value); await TransferEngine.SendAsync(path, pairing, progress, sending.Token); StatusText.Text = "Receiver confirmed: file saved and verified."; }
+        catch (OperationCanceledException) when (sending.IsCancellationRequested) { StatusText.Text = "Sending cancelled. Delivery was not confirmed."; }
         catch (Exception ex) { StatusText.Text = $"Transfer not confirmed: {ex.Message}"; }
-        finally { button.IsEnabled = true; }
+        finally { sending.Dispose(); sending = null; button.Content = "Send file"; }
+    }
+    private Task<bool> ApproveIncoming(TransferHeader header, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var answer = System.Windows.MessageBox.Show(this,
+            $"Save this incoming file?\n\n{header.Name}\n{header.Length:N0} bytes\n\nDestination: {receiveFolder}\n\nOnly accept files you expect. Respond within 20 seconds.",
+            "Incoming file", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No);
+        token.ThrowIfCancellationRequested();
+        return Task.FromResult(answer == MessageBoxResult.Yes);
     }
 }

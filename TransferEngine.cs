@@ -48,6 +48,9 @@ public static class TransferEngine
     {
         pairing = PairingCode.Parse(pairing.ToString());
         await using var file = File.OpenRead(path);
+        // Hash before connecting so a large source cannot consume the receiver's idle timeout.
+        var hash = Convert.ToHexString(await SHA256.HashDataAsync(file, cancellationToken));
+        file.Position = 0;
         using var client = new TcpClient();
         using var setupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         setupTimeout.CancelAfter(TimeSpan.FromSeconds(15));
@@ -59,8 +62,6 @@ public static class TransferEngine
         var accepted = new byte[1];
         await ReadExact(stream, accepted, setupTimeout.Token);
         if (accepted[0] != 1) throw new AuthenticationException("The receiver rejected this pairing code.");
-        var hash = Convert.ToHexString(await SHA256.HashDataAsync(file, cancellationToken));
-        file.Position = 0;
         var header = new TransferHeader(Path.GetFileName(path), file.Length, hash);
         await WriteHeader(stream, header, cancellationToken);
         await CopyAsync(file, stream, file.Length, progress, cancellationToken);
@@ -70,7 +71,7 @@ public static class TransferEngine
         await ReadExact(stream, acknowledgement, acknowledgementTimeout.Token);
         if (acknowledgement[0] != 1) throw new IOException("Receiver did not confirm verification.");
     }
-    public static async Task<TransferHeader> ReceiveAsync(TcpListener listener, string folder, ReceiveSession session, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
+    public static async Task<TransferHeader> ReceiveAsync(TcpListener listener, string folder, ReceiveSession session, Func<TransferHeader, CancellationToken, Task<bool>> approve, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
         using var client = await listener.AcceptTcpClientAsync(cancellationToken);
         await using var stream = new SslStream(client.GetStream(), false);
@@ -85,9 +86,20 @@ public static class TransferEngine
         var safeName = Path.GetFileName(header.Name);
         if (string.IsNullOrWhiteSpace(safeName) || safeName != header.Name || safeName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || safeName.EndsWith('.') || safeName.EndsWith(' ') || safeName is "." or "..") throw new InvalidDataException("The incoming filename is unsafe.");
         if (header.Length < 0 || header.Sha256 is null || header.Sha256.Length != 64 || !header.Sha256.All(Uri.IsHexDigit)) throw new InvalidDataException("Invalid transfer metadata.");
-        Directory.CreateDirectory(folder);
+        var deviceName = safeName.Split('.')[0].TrimEnd(' ').ToUpperInvariant();
+        if (deviceName is "CON" or "PRN" or "AUX" or "NUL" ||
+            (deviceName.Length == 4 && (deviceName.StartsWith("COM") || deviceName.StartsWith("LPT")) && "123456789\u00b9\u00b2\u00b3".Contains(deviceName[3])))
+            throw new InvalidDataException("Windows device names cannot be received as files.");
         var target = Path.Combine(folder, safeName);
         if (File.Exists(target) || Directory.Exists(target)) throw new IOException("A file with this name already exists. Nothing was overwritten.");
+        var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(folder))!);
+        const long reserve = 16 * 1024 * 1024;
+        if (header.Length > Math.Max(0, drive.AvailableFreeSpace - reserve)) throw new IOException("Not enough free disk space to receive this file safely.");
+        using var approvalTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        approvalTimeout.CancelAfter(TimeSpan.FromSeconds(20));
+        if (!await approve(header, approvalTimeout.Token).WaitAsync(approvalTimeout.Token)) throw new IOException("The incoming file was declined.");
+        cancellationToken.ThrowIfCancellationRequested();
+        Directory.CreateDirectory(folder);
         var temporary = Path.Combine(folder, ".openshare-" + Guid.NewGuid().ToString("N") + ".partial");
         try
         {
@@ -96,7 +108,12 @@ public static class TransferEngine
                 await CopyAsync(stream, file, header.Length, progress, cancellationToken);
                 await file.FlushAsync(cancellationToken);
             }
-            if (!Hash(temporary).Equals(header.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Transfer integrity verification failed.");
+            await using (var verification = File.OpenRead(temporary))
+            {
+                var actual = Convert.ToHexString(await SHA256.HashDataAsync(verification, cancellationToken));
+                if (!actual.Equals(header.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Transfer integrity verification failed.");
+            }
+            cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporary, target, false);
             await stream.WriteAsync(new byte[] { 1 }, cancellationToken);
             return header;
@@ -127,5 +144,4 @@ public static class TransferEngine
         catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new IOException("The connection was idle for 30 seconds."); }
     }
     private static async Task ReadExact(Stream stream, byte[] buffer, CancellationToken token) { var offset = 0; while (offset < buffer.Length) { var read = await ReadWithTimeout(stream, buffer.AsMemory(offset, buffer.Length - offset), token); if (read == 0) throw new EndOfStreamException(); offset += read; } }
-    private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
 }
