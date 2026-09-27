@@ -9,7 +9,9 @@ OpenShare sends files directly between devices on the same network. It has no ac
 3. On the sending device, choose a file and enter the receiver address as `IP:code`.
 4. OpenShare transfers the file directly and verifies it with SHA-256 before reporting success.
 
-The first release is Windows-focused. Both devices must be able to connect to the receiver over the local network, and Windows Firewall may ask for permission.
+This Windows preview requires both devices to connect over the local network. Windows Firewall may ask for permission. Transfers are currently unencrypted and unauthenticated. Use only a trusted network; a port number is an address, not a pairing secret. Browser and phone support are not implemented yet.
+
+Incoming files are staged until their hash is verified. Existing files are never overwritten, and incomplete transfers are removed. The sender reports success only after the receiver confirms verification and saving. This protocol requires both peers to use the updated version.
 
 OpenShare is not affiliated with Apple, Microsoft, Google, or any cloud provider.
 
