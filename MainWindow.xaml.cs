@@ -34,7 +34,7 @@ public partial class MainWindow : Window
             var progress = TransferProgress(true);
             var receipt = await TransferEngine.ReceiveAsync(listener, folder, session, ApproveIncoming, progress, cancellation.Token);
             TransferHistory.Append(receipt);
-            StatusText.Text = $"Received and verified {receipt.Name}. Receipt saved.";
+            StatusText.Text = $"Received and verified {receipt.Name}";
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { StatusText.Text = "Receiving stopped. Incomplete data was removed."; }
         catch (OperationCanceledException) { StatusText.Text = "The connection or approval timed out. Start receiving to try again."; }
@@ -63,7 +63,7 @@ public partial class MainWindow : Window
         button.Content = "Cancel sending";
         Progress.Value = 0;
         StatusText.Text = "Preparing file. The receiver must approve it before saving.";
-        try { transferSize = new FileInfo(path).Length; var progress = TransferProgress(false); var receipt = await TransferEngine.SendAsync(path, pairing, progress, sending.Token); TransferHistory.Append(receipt); StatusText.Text = "Receiver confirmed: file saved and verified. Receipt saved."; }
+        try { transferSize = new FileInfo(path).Length; var progress = TransferProgress(false); var receipt = await TransferEngine.SendAsync(path, pairing, progress, sending.Token); TransferHistory.Append(receipt); StatusText.Text = "Receiver confirmed: file saved and verified."; }
         catch (OperationCanceledException) when (sending.IsCancellationRequested) { StatusText.Text = "Sending cancelled. Delivery was not confirmed."; }
         catch (Exception ex) { Diagnostics.Record("send-failed", ex); StatusText.Text = $"Transfer not confirmed: {ex.Message}"; }
         finally { sending.Dispose(); sending = null; button.Content = "Send file"; }
