@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 namespace OpenShare;
 public sealed record TransferHeader(string Name, long Length, string Sha256);
+public sealed record TransferReceipt(string Direction, DateTimeOffset CompletedAt, string Name, long Length, string Sha256);
 public sealed record PairingCode(string Host, int Port, string Fingerprint, string Secret)
 {
     public override string ToString() => $"openshare1|{Host}|{Port}|{Fingerprint}|{Secret}";
@@ -44,7 +45,7 @@ public sealed class ReceiveSession : IDisposable
 }
 public static class TransferEngine
 {
-    public static async Task SendAsync(string path, PairingCode pairing, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
+    public static async Task<TransferReceipt> SendAsync(string path, PairingCode pairing, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
         pairing = PairingCode.Parse(pairing.ToString());
         await using var file = File.OpenRead(path);
@@ -70,8 +71,9 @@ public static class TransferEngine
         var acknowledgement = new byte[1];
         await ReadExact(stream, acknowledgement, acknowledgementTimeout.Token);
         if (acknowledgement[0] != 1) throw new IOException("Receiver did not confirm verification.");
+        return new("Sent", DateTimeOffset.UtcNow, header.Name, header.Length, header.Sha256);
     }
-    public static async Task<TransferHeader> ReceiveAsync(TcpListener listener, string folder, ReceiveSession session, Func<TransferHeader, CancellationToken, Task<bool>> approve, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
+    public static async Task<TransferReceipt> ReceiveAsync(TcpListener listener, string folder, ReceiveSession session, Func<TransferHeader, CancellationToken, Task<bool>> approve, IProgress<double>? progress = null, CancellationToken cancellationToken = default)
     {
         using var client = await listener.AcceptTcpClientAsync(cancellationToken);
         await using var stream = new SslStream(client.GetStream(), false);
@@ -116,7 +118,7 @@ public static class TransferEngine
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporary, target, false);
             await stream.WriteAsync(new byte[] { 1 }, cancellationToken);
-            return header;
+            return new("Received", DateTimeOffset.UtcNow, header.Name, header.Length, header.Sha256);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

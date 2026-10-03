@@ -33,8 +33,14 @@ try
         try { await Task.WhenAll(receive, send); }
         catch { Console.Error.WriteLine(receive.Exception); throw; }
         var header = await receive;
+        var sentReceipt = await send;
+        if (sentReceipt.Direction != "Sent" || header.Direction != "Received" || sentReceipt.Sha256 != header.Sha256 || sentReceipt.Length != header.Length) throw new Exception("Transfer receipts disagree.");
         if (!File.ReadAllBytes(Path.Combine(destination, header.Name)).SequenceEqual(File.ReadAllBytes(source))) throw new Exception("Content mismatch.");
     }
+    var historyPath = Path.Combine(root, "history", "receipts.json");
+    for (var i = 0; i < 105; i++) TransferHistory.Append(new("Sent", DateTimeOffset.UtcNow, $"file-{i}.bin", i, new string('A', 64)), historyPath, 100);
+    var history = TransferHistory.Load(historyPath);
+    if (history.Count != 100 || history[0].Name != "file-5.bin" || File.ReadAllText(historyPath).Contains("openshare1|")) throw new Exception("Bounded private transfer history failed.");
     await Reject("collision", new TransferHeader("existing.txt", 0, new string('0', 64)), Array.Empty<byte>(), true);
     await Reject("traversal", new TransferHeader("../outside.txt", 0, new string('0', 64)), Array.Empty<byte>());
     await Reject("negative", new TransferHeader("file.txt", -1, new string('0', 64)), Array.Empty<byte>());

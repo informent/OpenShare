@@ -1,4 +1,8 @@
-# OpenShare 0.3.0 preview
+# OpenShare 1.0.0
+
+- Save local receipts only after confirmed, SHA-256-verified delivery.
+- Retain the newest 100 transfers using atomic history-file replacement.
+- Keep pairing codes, secrets, certificate data, peer addresses, and file contents out of history.
 
 This grouped reliability update adds receiver consent, storage safeguards, usable progress feedback and executable-level regression tests.
 

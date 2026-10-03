@@ -14,7 +14,7 @@ This Windows preview requires both devices to connect over the local network. Wi
 
 Keep pairing codes private. Anyone with the current code can send one file; this does not prove their personal identity. Each receiving session creates a fresh certificate and secret. When several network addresses are listed, use the code for the network shared by both devices. A loopback address (`127.0.0.1`) works only on the same PC. Both peers must run this updated protocol; old `IP:port` codes are rejected.
 
-Version 0.3.0 adds receive approval, a disk-space preflight with a 16 MiB reserve, and send cancellation. Free space can change after preflight; storage failures still abort the transfer and remove partial data.
+Version 1.0.0 adds cryptographically anchored transfer receipts and bounded local history. After confirmed delivery, OpenShare records direction, UTC completion time, filename, byte count, and SHA-256. Pairing codes, secrets, certificates, file contents, and peer addresses are never written to receipt history. The newest 100 receipts are retained under the current user's local application data.
 
 Validation includes encrypted loopback transfers, wrong certificate and secret rejection, malformed codes, unsafe filenames, tampered/truncated data, overwrite protection, decline without disk writes, and cancellation cleanup. This is not an independent security audit or proof of two-device network compatibility. Browser/phone support and a full UI interaction review remain future work.
 

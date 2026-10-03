@@ -1,6 +1,9 @@
-# OpenShare 0.3.0 validation
+# OpenShare 1.0.0 validation
 
 ## Verified locally on Windows, September 27, 2026
+
+- Confirmed send and receive receipts agree on filename, byte count, and SHA-256.
+- Receipt history retains only the newest 100 records and excludes pairing-code material.
 
 - Encrypted transfers of empty, 100,000-byte and 2,000,000-byte files.
 - A 256 MiB file with a Unicode filename sent to a separate receiver process, with exact size and SHA-256 comparison.
