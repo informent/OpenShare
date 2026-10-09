@@ -20,7 +20,7 @@ jobs:
         run: Copy-Item README.md,LICENSE,RELEASE-NOTES.md,VALIDATION.md release\OpenShare
       - shell: pwsh
         run: Compress-Archive -Path release\OpenShare\* -DestinationPath OpenShare-${{ github.ref_name }}-win-x64.zip
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           prerelease: true
